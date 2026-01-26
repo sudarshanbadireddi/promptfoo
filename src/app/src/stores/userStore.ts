@@ -30,11 +30,12 @@ export const useUserStore = create<UserState>((set, getState) => ({
         const data = await response.json();
         set({ email: data.email, isLoading: false });
       } else {
-        throw new Error('Failed to fetch user email');
+        // Silently continue without email for local-only usage
+        set({ isLoading: false });
       }
     } catch (error) {
-      console.error('Error fetching user email:', error);
-      set({ email: null, isLoading: false });
+      // Silently continue without email for local-only usage
+      set({ isLoading: false });
     }
   },
   fetchUserId: async () => {

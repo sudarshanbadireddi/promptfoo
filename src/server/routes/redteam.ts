@@ -256,26 +256,16 @@ redteamRouter.post('/generate-test', async (req: Request, res: Response): Promis
 });
 
 // Track the current running job
-let currentJobId: string | null = null;
-let currentAbortController: AbortController | null = null;
+// Track multiple concurrent redteam jobs with their abort controllers
+const runningJobIds: Map<string, AbortController> = new Map();
 
 redteamRouter.post('/run', async (req: Request, res: Response): Promise<void> => {
-  // If there's a current job running, abort it
-  if (currentJobId) {
-    if (currentAbortController) {
-      currentAbortController.abort();
-    }
-    const existingJob = evalJobs.get(currentJobId);
-    if (existingJob) {
-      existingJob.status = 'error';
-      existingJob.logs.push('Job cancelled - new job started');
-    }
-  }
-
   const { config, force, verbose, delay, maxConcurrency } = req.body;
   const id = crypto.randomUUID();
-  currentJobId = id;
-  currentAbortController = new AbortController();
+  const abortController = new AbortController();
+  
+  // Track this job
+  runningJobIds.set(id, abortController);
 
   // Initialize job status with empty logs array
   evalJobs.set(id, {
@@ -293,68 +283,69 @@ redteamRouter.post('/run', async (req: Request, res: Response): Promise<void> =>
   // Validate and normalize maxConcurrency
   const normalizedMaxConcurrency = Math.max(1, Number(maxConcurrency || '1'));
 
-  // Run redteam in background
+  // Create a job-specific logCallback that's isolated from other concurrent jobs
+  // This captures the job ID in closure to prevent log cross-contamination
+  const jobLogCallback = (message: string) => {
+    const job = evalJobs.get(id);
+    if (job) {
+      job.logs.push(message);
+    }
+  };
+
+  // Run redteam in background - pass logCallback to use addLogCallback internally
   doRedteamRun({
     liveRedteamConfig: config,
     force,
     verbose,
     delay: Number(delay || '0'),
     maxConcurrency: normalizedMaxConcurrency,
-    logCallback: (message: string) => {
-      if (currentJobId === id) {
-        const job = evalJobs.get(id);
-        if (job) {
-          job.logs.push(message);
-        }
-      }
-    },
-    abortSignal: currentAbortController.signal,
+    logCallback: jobLogCallback,
+    abortSignal: abortController.signal,
   })
-    .then(async (evalResult) => {
-      const summary = evalResult ? await evalResult.toEvaluateSummary() : null;
+    .then(async (result) => {
       const job = evalJobs.get(id);
-      if (job && currentJobId === id) {
+      if (job) {
         job.status = 'complete';
-        job.result = summary;
-        job.evalId = evalResult?.id ?? null;
+        job.result = result ? await result.toEvaluateSummary() : null;
+        job.evalId = result?.id || null;
       }
-      if (currentJobId === id) {
+      // Clean up running job tracker
+      runningJobIds.delete(id);
+      if (runningJobIds.size === 0) {
         cliState.webUI = false;
-        currentJobId = null;
-        currentAbortController = null;
       }
     })
     .catch((error) => {
-      logger.error(`Error running red team: ${error}\n${error.stack || ''}`);
       const job = evalJobs.get(id);
-      if (job && currentJobId === id) {
+      if (job) {
         job.status = 'error';
-        job.logs.push(`Error: ${error.message}`);
-        if (error.stack) {
-          job.logs.push(`Stack trace: ${error.stack}`);
-        }
+        job.logs.push(`Error: ${error instanceof Error ? error.message : String(error)}`);
       }
-      if (currentJobId === id) {
+      // Clean up running job tracker
+      runningJobIds.delete(id);
+      if (runningJobIds.size === 0) {
         cliState.webUI = false;
-        currentJobId = null;
-        currentAbortController = null;
       }
     });
 
   res.json({ id });
 });
 
-redteamRouter.post('/cancel', async (_req: Request, res: Response): Promise<void> => {
-  if (!currentJobId) {
-    res.status(400).json({ error: 'No job currently running' });
+redteamRouter.post('/cancel', async (req: Request, res: Response): Promise<void> => {
+  const { jobId } = req.query;
+  
+  if (!jobId || typeof jobId !== 'string') {
+    res.status(400).json({ error: 'Job ID is required' });
     return;
   }
 
-  const jobId = currentJobId;
-
-  if (currentAbortController) {
-    currentAbortController.abort();
+  const abortController = runningJobIds.get(jobId);
+  if (!abortController) {
+    res.status(400).json({ error: 'Job not found or already completed' });
+    return;
   }
+
+  abortController.abort();
 
   const job = evalJobs.get(jobId);
   if (job) {
@@ -362,10 +353,11 @@ redteamRouter.post('/cancel', async (_req: Request, res: Response): Promise<void
     job.logs.push('Job cancelled by user');
   }
 
-  // Clear state
-  cliState.webUI = false;
-  currentJobId = null;
-  currentAbortController = null;
+  // Remove from running jobs
+  runningJobIds.delete(jobId);
+  if (runningJobIds.size === 0) {
+    cliState.webUI = false;
+  }
 
   // Wait a moment to ensure cleanup
   await new Promise((resolve) => setTimeout(resolve, 100));
@@ -422,8 +414,12 @@ redteamRouter.post('/:taskId', async (req: Request, res: Response): Promise<void
 });
 
 redteamRouter.get('/status', async (_req: Request, res: Response): Promise<void> => {
+  const runningIds = Array.from(runningJobIds.keys());
   res.json({
-    hasRunningJob: currentJobId !== null,
-    jobId: currentJobId,
+    hasRunningJob: runningIds.length > 0,
+    runningJobs: runningIds,
+    runningCount: runningIds.length,
+    runningJobIds: runningIds,
+    jobId: runningIds[0] || null, // For backwards compatibility, return first job
   });
 });

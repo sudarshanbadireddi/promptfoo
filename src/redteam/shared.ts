@@ -1,11 +1,12 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import * as crypto from 'crypto';
 
 import chalk from 'chalk';
 import yaml from 'js-yaml';
 import { doEval } from '../commands/eval';
-import logger, { setLogCallback, setLogLevel } from '../logger';
+import logger, { addLogCallback, runInJobContext, setLogLevel } from '../logger';
 import { checkRemoteHealth } from '../util/apiHealth';
 import { loadDefaultConfig } from '../util/config/default';
 import { promptfooCommand } from '../util/promptfooCommand';
@@ -18,16 +19,24 @@ import type Eval from '../models/eval';
 import type { RedteamRunOptions } from './types';
 
 export async function doRedteamRun(options: RedteamRunOptions): Promise<Eval | undefined> {
-  if (options.verbose) {
-    setLogLevel('debug');
-  }
-  if (options.logCallback) {
-    setLogCallback(options.logCallback);
-  }
+  // Generate a unique job ID for this execution
+  const jobId = crypto.randomUUID();
+  
+  // Wrap entire execution in job context
+  return runInJobContext(jobId, async () => {
+    if (options.verbose) {
+      setLogLevel('debug');
+    }
+    
+    // Register callback for this specific job
+    let removeCallback: (() => void) | null = null;
+    if (options.logCallback) {
+      removeCallback = addLogCallback(jobId, options.logCallback);
+    }
 
-  // Enable live verbose toggle (press 'v' to toggle debug logs)
-  // Only works in interactive TTY mode, not in CI or web UI
-  const verboseToggleCleanup = options.logCallback ? null : initVerboseToggle();
+    // Enable live verbose toggle (press 'v' to toggle debug logs)
+    // Only works in interactive TTY mode, not in CI or web UI
+    const verboseToggleCleanup = options.logCallback ? null : initVerboseToggle();
 
   let configPath: string = options.config ?? 'promptfooconfig.yaml';
 
@@ -97,7 +106,10 @@ export async function doRedteamRun(options: RedteamRunOptions): Promise<Eval | u
     if (error instanceof PartialGenerationError) {
       // Log the detailed error message - this will be visible in CLI and UI (via logCallback)
       logger.error(chalk.red('\n' + error.message));
-      setLogCallback(null);
+      // Remove callback for this job
+      if (removeCallback) {
+        removeCallback();
+      }
       if (verboseToggleCleanup) {
         verboseToggleCleanup();
       }
@@ -111,6 +123,10 @@ export async function doRedteamRun(options: RedteamRunOptions): Promise<Eval | u
   // Check if redteam.yaml exists before running evaluation
   if (!redteamConfig || !fs.existsSync(redteamPath)) {
     logger.info('No test cases generated. Skipping scan.');
+    // Remove callback for this job
+    if (removeCallback) {
+      removeCallback();
+    }
     if (verboseToggleCleanup) {
       verboseToggleCleanup();
     }
@@ -156,12 +172,15 @@ export async function doRedteamRun(options: RedteamRunOptions): Promise<Eval | u
     }
   }
 
-  // Cleanup
-  setLogCallback(null);
+  // Cleanup - remove callback for this job
+  if (removeCallback) {
+    removeCallback();
+  }
   if (verboseToggleCleanup) {
     verboseToggleCleanup();
   }
   return evalResult;
+  });
 }
 
 /**

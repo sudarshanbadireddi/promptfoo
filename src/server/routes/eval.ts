@@ -95,24 +95,38 @@ evalRouter.get('/job/:id', (req: Request, res: Response): void => {
     res.status(404).json({ error: 'Job not found' });
     return;
   }
+  
+  // Disable caching to ensure fresh logs on every poll
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  
+  // Support incremental log streaming: only send logs since lastLogIndex
+  const lastLogIndex = parseInt(req.query.lastLogIndex as string, 10) || 0;
+  const newLogs = job.logs.slice(lastLogIndex);
+  const totalLogCount = job.logs.length;
+  
   if (job.status === 'complete') {
     res.json({
       status: 'complete',
       result: job.result,
       evalId: job.evalId,
-      logs: job.logs,
+      logs: newLogs,
+      totalLogCount,
     });
   } else if (job.status === 'error') {
     res.json({
       status: 'error',
-      logs: job.logs,
+      logs: newLogs,
+      totalLogCount,
     });
   } else {
     res.json({
       status: 'in-progress',
       progress: job.progress,
       total: job.total,
-      logs: job.logs,
+      logs: newLogs,
+      totalLogCount,
     });
   }
 });

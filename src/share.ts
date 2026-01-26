@@ -1,12 +1,11 @@
 import { URL } from 'url';
 
-import input from '@inquirer/input';
 import chalk from 'chalk';
 import cliProgress from 'cli-progress';
 import { isBlobStorageEnabled } from './blobs/extractor';
 import { getDefaultShareViewBaseUrl, getShareApiBaseUrl, getShareViewBaseUrl } from './constants';
 import { getEnvBool, getEnvInt, getEnvString, isCI } from './envars';
-import { getUserEmail, setUserEmail } from './globalConfig/accounts';
+import { getUserEmail } from './globalConfig/accounts';
 import { cloudConfig } from './globalConfig/cloud';
 import logger, { isDebugEnabled } from './logger';
 import {
@@ -408,21 +407,13 @@ export function stripAuthFromUrl(urlString: string): string {
 }
 
 async function handleEmailCollection(evalRecord: Eval): Promise<void> {
-  if (!process.stdout.isTTY || isCI() || getEnvBool('PROMPTFOO_DISABLE_SHARE_EMAIL_REQUEST')) {
-    return;
+  // Do not prompt for email interactively. If an email is already
+  // configured (e.g., from global config), attach it; otherwise skip.
+  const email = getUserEmail();
+  if (email) {
+    evalRecord.author = email;
+    await evalRecord.save();
   }
-
-  let email = getUserEmail();
-  if (!email) {
-    email = await input({
-      message: `${chalk.bold('Please enter your work email address')} (for managing shared URLs):`,
-      validate: (value) => value.includes('@') || 'Please enter a valid email address',
-    });
-    setUserEmail(email);
-  }
-
-  evalRecord.author = email;
-  await evalRecord.save();
 }
 
 async function getApiConfig(evalRecord: Eval): Promise<{

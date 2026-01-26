@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import { Alert, AlertContent, AlertDescription } from '@app/components/ui/alert';
+import { Alert, AlertContent, AlertDescription, AlertTitle } from '@app/components/ui/alert';
 import { Badge } from '@app/components/ui/badge';
 import { Button } from '@app/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@app/components/ui/card';
@@ -24,7 +24,6 @@ import { Spinner } from '@app/components/ui/spinner';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@app/components/ui/tooltip';
 import { EVAL_ROUTES, REDTEAM_ROUTES } from '@app/constants/routes';
 import { useApiHealth } from '@app/hooks/useApiHealth';
-import { useEmailVerification } from '@app/hooks/useEmailVerification';
 import { useTelemetry } from '@app/hooks/useTelemetry';
 import { useToast } from '@app/hooks/useToast';
 import { cn } from '@app/lib/utils';
@@ -54,13 +53,13 @@ import { Link } from 'react-router-dom';
 import { useRedTeamConfig } from '../hooks/useRedTeamConfig';
 import { generateOrderedYaml } from '../utils/yamlHelpers';
 import DefaultTestVariables from './DefaultTestVariables';
-import { EmailVerificationDialog } from './EmailVerificationDialog';
 import EstimationsDisplay from './EstimationsDisplay';
 import { LogViewer } from './LogViewer';
 import PageWrapper from './PageWrapper';
 import { RunOptionsContent } from './RunOptions';
 import type { Policy, PolicyObject, RedteamPlugin } from '@promptfoo/redteam/types';
 import type { Job, RedteamRunOptions } from '@promptfoo/types';
+import type { Job as RedteamJob } from '@app/stores/redteamJobStore';
 
 interface ReviewProps {
   onBack?: () => void;
@@ -91,13 +90,61 @@ export default function Review({
     data: { status: apiHealthStatus },
     isLoading: isCheckingApiHealth,
   } = useApiHealth();
-  const { jobId: savedJobId, setJob, clearJob, _hasHydrated } = useRedteamJobStore();
-  const pollIntervalRef = useRef<number | null>(null);
+  const addJob = useRedteamJobStore((state) => state.addJob);
+  const removeJob = useRedteamJobStore((state) => state.removeJob);
+  const updateJob = useRedteamJobStore((state) => state.updateJob);
+  const _hasHydrated = useRedteamJobStore((state) => state._hasHydrated);
+  const jobs = useRedteamJobStore((state) => state.jobs);
+  const runningJobs = useMemo(() => {
+    // Ensure jobs is a Map (it might be deserialized from localStorage as object)
+    let jobsMap: Map<string, RedteamJob>;
+    if (jobs instanceof Map) {
+      jobsMap = jobs;
+    } else if (jobs && typeof jobs === 'object') {
+      jobsMap = new Map(Object.entries(jobs));
+    } else {
+      jobsMap = new Map();
+    }
+    return Array.from(jobsMap.values()).filter((job) => {
+      return job.status === 'running' || job.status === 'in-progress';
+    });
+  }, [jobs]);
+  const pollIntervalRef = useRef<Map<string, number>>(new Map()); // Track multiple poll intervals
+  
+  // Track which jobs THIS browser instance is actively polling (for log display)
+  const [activePollingJobIds, setActivePollingJobIds] = useState<Set<string>>(new Set());
+  const [pollLogs, setPollLogs] = useState<Record<string, string[]>>({});
+  
+  // Create synthetic jobs from activePollingJobIds and pollLogs for immediate display
+  const displayJobs = useMemo(() => {
+    // Ensure jobs is a Map (it might be deserialized from localStorage as object)
+    let jobsMap: Map<string, RedteamJob>;
+    if (jobs instanceof Map) {
+      jobsMap = jobs;
+    } else if (jobs && typeof jobs === 'object') {
+      jobsMap = new Map(Object.entries(jobs));
+    } else {
+      jobsMap = new Map();
+    }
+
+    if (activePollingJobIds.size > 0) {
+      return Array.from(activePollingJobIds).map(jobId => {
+        const storeJob = jobsMap.get(jobId);
+        return {
+          id: jobId,
+          status: storeJob?.status || 'running',
+          logs: pollLogs[jobId] || storeJob?.logs || [],
+          evalId: storeJob?.evalId || null,
+          result: storeJob?.result || null,
+        } as RedteamJob;
+      });
+    }
+    return runningJobs;
+  }, [activePollingJobIds, pollLogs, jobs, runningJobs]);
   const [isYamlDialogOpen, setIsYamlDialogOpen] = React.useState(false);
   const yamlContent = useMemo(() => generateOrderedYaml(config), [config]);
 
   const [isRunning, setIsRunning] = React.useState(false);
-  const [logs, setLogs] = React.useState<string[]>([]);
   const [evalId, setEvalId] = React.useState<string | null>(null);
   const { showToast } = useToast();
   const [forceRegeneration /*, setForceRegeneration*/] = React.useState(true);
@@ -105,10 +152,6 @@ export default function Review({
     String(config.maxConcurrency || REDTEAM_DEFAULTS.MAX_CONCURRENCY),
   );
   const [isJobStatusDialogOpen, setIsJobStatusDialogOpen] = useState(false);
-  const [isEmailDialogOpen, setIsEmailDialogOpen] = useState(false);
-  const [emailVerificationMessage, setEmailVerificationMessage] = useState('');
-  const [emailVerificationError, setEmailVerificationError] = useState<string | null>(null);
-  const { checkEmailStatus } = useEmailVerification();
   const [isPurposeExpanded, setIsPurposeExpanded] = useState(false);
   const [isTestInstructionsExpanded, setIsTestInstructionsExpanded] = useState(false);
   const [isRunOptionsExpanded, setIsRunOptionsExpanded] = useState(true);
@@ -216,58 +259,101 @@ export default function Review({
 
     const recoverJob = async () => {
       // Check what the server thinks is running
-      const { hasRunningJob, jobId: serverJobId } = await checkForRunningJob();
+      const { runningCount, runningJobIds } = await checkForRunningJob();
 
-      if (hasRunningJob && serverJobId) {
-        // Server has a running job - reconnect to it
-        try {
-          const jobResponse = await callApi(`/eval/job/${serverJobId}`);
-          if (jobResponse.ok) {
-            const job = (await jobResponse.json()) as Job;
-            setLogs(job.logs || []);
+      // Reconnect to all running jobs on the server
+      if (runningCount > 0 && runningJobIds.length > 0) {
+        for (const serverJobId of runningJobIds) {
+          try {
+            const jobResponse = await callApi(`/eval/job/${serverJobId}`);
+            if (jobResponse.ok) {
+              const job = (await jobResponse.json()) as Job;
 
-            if (job.status === 'in-progress') {
-              setIsRunning(true);
-              setJob(serverJobId);
-              startPolling(serverJobId);
-            } else if (job.status === 'complete' && job.evalId) {
-              setEvalId(job.evalId);
-              clearJob();
-            } else if (job.status === 'error') {
-              setLogs(job.logs || []);
-              showToast('Previous job failed. Check logs for details.', 'error');
-              clearJob();
+              if (job.status === 'in-progress') {
+                setIsRunning(true);
+                startPolling(serverJobId);
+              } else if (job.status === 'complete' && job.evalId) {
+                setEvalId(job.evalId);
+                const remove = useRedteamJobStore.getState().removeJob;
+                if (typeof remove === 'function') {
+                  remove(serverJobId);
+                }
+              } else if (job.status === 'error') {
+                showToast(`Job ${serverJobId} failed. Check logs for details.`, 'error');
+                const remove = useRedteamJobStore.getState().removeJob;
+                if (typeof remove === 'function') {
+                  remove(serverJobId);
+                }
+              }
+            } else {
+              // Server reported a running job but we couldn't fetch it
+              showToast(`Could not reconnect to job ${serverJobId}.`, 'error');
+              const remove = useRedteamJobStore.getState().removeJob;
+              if (typeof remove === 'function') {
+                remove(serverJobId);
+              }
             }
-          } else {
-            // Server reported a running job but we couldn't fetch it
-            showToast('Could not reconnect to running job.', 'error');
-            clearJob();
+          } catch (error) {
+            console.error('Failed to recover job:', error);
+            showToast(`Failed to reconnect to job ${serverJobId}.`, 'error');
+            const remove = useRedteamJobStore.getState().removeJob;
+            if (typeof remove === 'function') {
+              remove(serverJobId);
+            }
           }
-        } catch (error) {
-          console.error('Failed to recover job:', error);
-          showToast('Failed to reconnect to running job.', 'error');
-          clearJob();
         }
-      } else if (savedJobId) {
-        // We have a saved job ID but server says nothing running
-        // Check if it completed while we were away
+      }
+
+      // Check all saved jobs in the store to see if any completed while we were away
+      // Ensure jobs is a Map (it might be deserialized from localStorage as object)
+      let jobsMap: Map<string, RedteamJob>;
+      if (jobs instanceof Map) {
+        jobsMap = jobs;
+      } else if (jobs && typeof jobs === 'object') {
+        jobsMap = new Map(Object.entries(jobs));
+      } else {
+        jobsMap = new Map();
+      }
+      const savedJobs = Array.from(jobsMap.values());
+      for (const savedJob of savedJobs as RedteamJob[]) {
+        // Skip jobs we already reconnected to
+        if (runningJobIds.includes(savedJob.id)) {
+          continue;
+        }
+
+        // Check if this job completed
         try {
-          const jobResponse = await callApi(`/eval/job/${savedJobId}`);
+          const jobResponse = await callApi(`/eval/job/${savedJob.id}`);
           if (jobResponse.ok) {
             const job = (await jobResponse.json()) as Job;
-            setLogs(job.logs || []);
 
             if (job.status === 'complete' && job.evalId) {
-              setEvalId(job.evalId);
-              showToast('Your evaluation completed!', 'success');
+              const update = useRedteamJobStore.getState().updateJob;
+              if (typeof update === 'function') {
+                update(savedJob.id, { status: 'complete', evalId: job.evalId });
+              }
+              showToast(`Job ${savedJob.id} completed!`, 'success');
             } else if (job.status === 'error') {
-              showToast('Previous job failed. Check logs for details.', 'error');
+              const update = useRedteamJobStore.getState().updateJob;
+              if (typeof update === 'function') {
+                update(savedJob.id, { status: 'error', logs: job.logs || [] });
+              }
+              showToast(`Job ${savedJob.id} failed.`, 'error');
+            }
+          } else {
+            // Job doesn't exist on server anymore
+            const remove = useRedteamJobStore.getState().removeJob;
+            if (typeof remove === 'function') {
+              remove(savedJob.id);
             }
           }
         } catch {
           // Job doesn't exist anymore (server restarted or cleaned up)
+          const remove = useRedteamJobStore.getState().removeJob;
+          if (typeof remove === 'function') {
+            remove(savedJob.id);
+          }
         }
-        clearJob();
       }
     };
 
@@ -360,69 +446,110 @@ export default function Review({
   }, [config.strategies]);
 
   const isRunNowDisabled = useMemo(() => {
-    return isRunning || ['blocked', 'disabled', 'unknown'].includes(apiHealthStatus);
-  }, [isRunning, apiHealthStatus]);
+    // Allow multiple parallel scans - don't disable based on isRunning
+    return false;
+  }, []);
 
   const runNowTooltipMessage = useMemo((): string | undefined => {
     if (isRunning) {
       return undefined;
     }
+    return undefined;
+  }, [isRunning]);
 
-    switch (apiHealthStatus) {
-      case 'blocked':
-        return 'Cannot connect to Promptfoo Cloud. Please check your network connection or API settings.';
-      case 'disabled':
-        return 'Remote generation is disabled. Running red team evaluations requires connection to Promptfoo Cloud.';
-      case 'unknown':
-        return 'Checking connection to Promptfoo Cloud...';
-      default:
-        return undefined;
-    }
-  }, [isRunning, apiHealthStatus]);
-
-  const checkForRunningJob = async (): Promise<JobStatusResponse> => {
+  const checkForRunningJob = async (): Promise<{ runningCount: number; runningJobIds: string[] }> => {
     try {
       const response = await callApi('/redteam/status');
       const data = await response.json();
-      return data;
+      return { runningCount: data.runningCount || 0, runningJobIds: data.runningJobIds || [] };
     } catch (error) {
       console.error('Error checking job status:', error);
-      return { hasRunningJob: false };
+      return { runningCount: 0, runningJobIds: [] };
     }
   };
 
   const startPolling = useCallback(
     (jobId: string) => {
-      // Clear any existing interval
-      if (pollIntervalRef.current) {
-        window.clearInterval(pollIntervalRef.current);
-        pollIntervalRef.current = null;
+      // Add job to store (fetch from current state to avoid undefined in rare hydration edge)
+      const add = useRedteamJobStore.getState().addJob;
+      if (typeof add === 'function') {
+        add(jobId);
       }
+      
+      // Track that this browser is polling this job
+      setActivePollingJobIds(prev => new Set(prev).add(jobId));
+      
+      // Track last log index for incremental updates
+      let lastLogIndex = 0;
 
       const interval = window.setInterval(async () => {
         try {
-          const statusResponse = await callApi(`/eval/job/${jobId}`);
+          const statusResponse = await callApi(`/eval/job/${jobId}?lastLogIndex=${lastLogIndex}`);
           if (!statusResponse.ok) {
             // Job not found - likely server restarted
             window.clearInterval(interval);
-            pollIntervalRef.current = null;
-            setIsRunning(false);
-            clearJob();
+            const pollIntervals = pollIntervalRef.current;
+            pollIntervals.delete(jobId);
+            setActivePollingJobIds(prev => {
+              const next = new Set(prev);
+              next.delete(jobId);
+              return next;
+            });
+            const remove = useRedteamJobStore.getState().removeJob;
+            if (typeof remove === 'function') {
+              remove(jobId);
+            }
             showToast('Job was interrupted. Please try again.', 'error');
             return;
           }
 
-          const status = (await statusResponse.json()) as Job;
+          const status = (await statusResponse.json()) as Job & { totalLogCount?: number };
 
-          if (status.logs) {
-            setLogs(status.logs);
+          // Accumulate new logs incrementally
+          if (status.logs && status.logs.length > 0) {
+            setPollLogs(prev => {
+              const existingLogs = prev[jobId] || [];
+              const updatedLogs = [...existingLogs, ...status.logs];
+              return {
+                ...prev,
+                [jobId]: updatedLogs,
+              };
+            });
+            
+            const update = useRedteamJobStore.getState().updateJob;
+            if (typeof update === 'function') {
+              const currentJob = useRedteamJobStore.getState().jobs.get?.(jobId);
+              const existingLogs = currentJob?.logs || [];
+              update(jobId, { logs: [...existingLogs, ...status.logs] });
+            }
+            
+            // Update lastLogIndex for next poll
+            if (status.totalLogCount !== undefined) {
+              lastLogIndex = status.totalLogCount;
+            }
           }
 
           if (status.status === 'complete' || status.status === 'error') {
             window.clearInterval(interval);
-            pollIntervalRef.current = null;
+            const pollIntervals = pollIntervalRef.current;
+            pollIntervals.delete(jobId);
+            setActivePollingJobIds(prev => {
+              const next = new Set(prev);
+              next.delete(jobId);
+              return next;
+            });
+
+            const update = useRedteamJobStore.getState().updateJob;
+            if (typeof update === 'function') {
+              update(jobId, {
+                status: status.status,
+                evalId: status.evalId || null,
+                result: status.result || null,
+              });
+            }
+
+            // Reset isRunning state when job completes
             setIsRunning(false);
-            clearJob();
 
             if (status.status === 'complete' && status.result && status.evalId) {
               setEvalId(status.evalId);
@@ -451,48 +578,17 @@ export default function Review({
         }
       }, 1000);
 
-      pollIntervalRef.current = interval;
+      const pollIntervals = pollIntervalRef.current;
+      pollIntervals.set(jobId, interval as unknown as number);
     },
-    [clearJob, recordEvent, showToast],
+    [recordEvent, showToast],
   );
 
   const handleRunWithSettings = async () => {
-    // Check email verification first
-    const emailResult = await checkEmailStatus();
+    // Skip email verification for local-only setups
+    // Email is optional and should not block redteam runs
 
-    if (!emailResult.canProceed) {
-      if (emailResult.needsEmail) {
-        setEmailVerificationMessage(
-          emailResult.status?.message ||
-            'Redteam evals require email verification. Please enter your work email:',
-        );
-        setIsEmailDialogOpen(true);
-        return;
-      } else if (emailResult.error) {
-        setEmailVerificationError(emailResult.error);
-        showToast(emailResult.error, 'error');
-        return;
-      }
-    }
-
-    // Show usage warning if present
-    if (emailResult.status?.status === 'show_usage_warning' && emailResult.status.message) {
-      showToast(emailResult.status.message, 'warning');
-    }
-
-    const { hasRunningJob } = await checkForRunningJob();
-
-    if (hasRunningJob) {
-      setIsJobStatusDialogOpen(true);
-      return;
-    }
-
-    // Clear any existing polling interval before starting a new job
-    if (pollIntervalRef.current) {
-      window.clearInterval(pollIntervalRef.current);
-      pollIntervalRef.current = null;
-    }
-
+    // Track feature usage
     recordEvent('feature_used', {
       feature: 'redteam_config_run',
       numPlugins: config.plugins.length,
@@ -517,7 +613,6 @@ export default function Review({
     });
 
     setIsRunning(true);
-    setLogs([]);
     setEvalId(null);
 
     try {
@@ -535,10 +630,14 @@ export default function Review({
         }),
       });
 
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
+        throw new Error(errorData.error || `Server returned ${response.status}`);
+      }
+
       const { id } = await response.json();
 
-      // Save job ID to persistent store and start polling
-      setJob(id);
+      // Start polling for this job
       startPolling(id);
     } catch (error) {
       console.error('Error running redteam:', error);
@@ -551,19 +650,19 @@ export default function Review({
     }
   };
 
-  const handleCancel = async () => {
+  const handleCancel = async (jobId: string) => {
     try {
-      await callApi('/redteam/cancel', {
+      await callApi(`/redteam/cancel?jobId=${jobId}`, {
         method: 'POST',
       });
 
-      if (pollIntervalRef.current) {
-        window.clearInterval(pollIntervalRef.current);
-        pollIntervalRef.current = null;
+      const pollIntervals = pollIntervalRef.current;
+      if (pollIntervals.has(jobId)) {
+        window.clearInterval(pollIntervals.get(jobId)!);
+        pollIntervals.delete(jobId);
       }
 
-      setIsRunning(false);
-      clearJob();
+      removeJob(jobId);
       showToast('Cancel request submitted', 'success');
     } catch (error) {
       console.error('Error cancelling job:', error);
@@ -572,23 +671,24 @@ export default function Review({
   };
 
   const handleCancelExistingAndRun = async () => {
-    try {
-      await handleCancel();
-      setIsJobStatusDialogOpen(false);
-      setTimeout(() => {
-        handleRunWithSettings();
-      }, 500);
-    } catch (error) {
-      console.error('Error canceling existing job:', error);
-      showToast('Failed to cancel existing job', 'error');
+    // Cancel all running jobs
+    for (const job of runningJobs) {
+      await handleCancel(job.id);
     }
+    setIsJobStatusDialogOpen(false);
+    setTimeout(() => {
+      handleRunWithSettings();
+    }, 500);
   };
 
   useEffect(() => {
     return () => {
-      if (pollIntervalRef.current) {
-        window.clearInterval(pollIntervalRef.current);
-      }
+      // Clear all polling intervals on component unmount
+      const pollIntervals = pollIntervalRef.current;
+      pollIntervals.forEach((interval) => {
+        window.clearInterval(interval);
+      });
+      pollIntervals.clear();
     };
   }, []);
 
@@ -1065,10 +1165,7 @@ export default function Review({
                     verbose: config.target.config.verbose,
                   }}
                   updateConfig={updateConfig}
-                  updateRunOption={(
-                    key: keyof RedteamRunOptions,
-                    value: RedteamRunOptions[keyof RedteamRunOptions],
-                  ) => {
+                  updateRunOption={(key: keyof RedteamRunOptions, value: any) => {
                     if (key === 'delay') {
                       updateConfig('target', {
                         ...config.target,
@@ -1126,19 +1223,14 @@ export default function Review({
             </p>
             {apiHealthStatus !== 'connected' && !isCheckingApiHealth && (
               <Alert variant="warning" className="mb-4">
-                <AlertContent>
-                  <AlertDescription>
-                    {apiHealthStatus === 'blocked'
-                      ? 'Cannot connect to Promptfoo Cloud. The "Run Now" option requires a connection to Promptfoo Cloud.'
-                      : apiHealthStatus === 'disabled'
-                        ? 'Remote generation is disabled. The "Run Now" option is not available.'
-                        : 'Checking connection status...'}
-                  </AlertDescription>
-                </AlertContent>
+                <AlertTitle>Promptfoo Cloud Connection Issue</AlertTitle>
+                <AlertDescription>
+                  Cannot connect to Promptfoo Cloud. Some features may be unavailable.
+                </AlertDescription>
               </Alert>
             )}
             <div className="mb-4">
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-3 flex-wrap">
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <span>
@@ -1148,17 +1240,29 @@ export default function Review({
                         className="gap-2"
                       >
                         {isRunning ? <Spinner className="size-4" /> : <Play className="size-4" />}
-                        {isRunning ? 'Running...' : 'Run Now'}
+                        {isRunning ? `Running (${runningJobs.length})...` : 'Run Now'}
                       </Button>
                     </span>
                   </TooltipTrigger>
                   {runNowTooltipMessage && <TooltipContent>{runNowTooltipMessage}</TooltipContent>}
                 </Tooltip>
                 {isRunning && (
-                  <Button variant="destructive" onClick={handleCancel} className="gap-2">
-                    <Square className="size-4" />
-                    Cancel
-                  </Button>
+                  <div className="flex gap-2">
+                    {runningJobs.map((job: RedteamJob) => (
+                      <Button 
+                        key={job.id}
+                        variant="destructive" 
+                        onClick={async () => {
+                          await handleCancel(job.id);
+                        }} 
+                        className="gap-2"
+                        title={`Cancel job ${job.id}`}
+                      >
+                        <Square className="size-4" />
+                        Cancel {runningJobs.length > 1 ? `(${job.id.slice(0, 8)})` : ''}
+                      </Button>
+                    ))}
+                  </div>
                 )}
                 {evalId && (
                   <>
@@ -1178,7 +1282,22 @@ export default function Review({
                 )}
               </div>
             </div>
-            {logs.length > 0 && <LogViewer logs={logs} />}
+            {displayJobs.length > 0 && (
+              <div className="mt-4">
+                {displayJobs.map((job: RedteamJob) => (
+                  <div key={job.id} className="mb-4">
+                    {displayJobs.length > 1 && (
+                      <h4 className="mb-2 text-sm font-semibold">Job {job.id.slice(0, 8)} Logs</h4>
+                    )}
+                    {job.logs?.length ? (
+                      <LogViewer logs={job.logs} />
+                    ) : (
+                      <p className="text-sm text-muted-foreground">No logs yet.</p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </Card>
 
@@ -1212,24 +1331,6 @@ export default function Review({
             </DialogFooter>
           </DialogContent>
         </Dialog>
-
-        {emailVerificationError && (
-          <Alert variant="destructive" className="mt-4">
-            <AlertContent>
-              <AlertDescription>{emailVerificationError}</AlertDescription>
-            </AlertContent>
-          </Alert>
-        )}
-
-        <EmailVerificationDialog
-          open={isEmailDialogOpen}
-          onClose={() => setIsEmailDialogOpen(false)}
-          onSuccess={() => {
-            setIsEmailDialogOpen(false);
-            handleRunWithSettings();
-          }}
-          message={emailVerificationMessage}
-        />
       </div>
     </PageWrapper>
   );

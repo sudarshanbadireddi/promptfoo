@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { AsyncLocalStorage } from 'async_hooks';
 
 import chalk from 'chalk';
 import winston from 'winston';
@@ -15,8 +16,28 @@ const MAX_LOG_FILES = 50;
 type LogCallback = (message: string) => void;
 export let globalLogCallback: LogCallback | null = null;
 
+// Job-scoped callbacks using AsyncLocalStorage
+const jobCallbacks = new Map<string, LogCallback>();
+const jobContextStorage = new AsyncLocalStorage<string>();
+
 export function setLogCallback(callback: LogCallback | null) {
   globalLogCallback = callback;
+}
+
+export function addLogCallback(jobId: string, callback: LogCallback): () => void {
+  jobCallbacks.set(jobId, callback);
+  // Return cleanup function to remove this callback
+  return () => {
+    jobCallbacks.delete(jobId);
+  };
+}
+
+export function getJobContext(): string | undefined {
+  return jobContextStorage.getStore();
+}
+
+export function runInJobContext<T>(jobId: string, fn: () => T): T {
+  return jobContextStorage.run(jobId, fn);
 }
 
 // Global configuration for structured logging
@@ -137,9 +158,18 @@ export const consoleFormatter = winston.format.printf(
   (info: winston.Logform.TransformableInfo): string => {
     const message = extractMessage(info);
 
-    // Call the callback if it exists
+    // Call the global callback if it exists (for backwards compatibility)
     if (globalLogCallback) {
       globalLogCallback(message);
+    }
+    
+    // Call job-specific callback if we're in a job context
+    const jobId = jobContextStorage.getStore();
+    if (jobId) {
+      const jobCallback = jobCallbacks.get(jobId);
+      if (jobCallback) {
+        jobCallback(message);
+      }
     }
 
     const location = info.location ? `${info.location} ` : '';

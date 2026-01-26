@@ -2,7 +2,6 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { getEnvBool } from '../../envars';
 import {
-  checkEmailStatus,
   clearUserEmail,
   getUserEmail,
   getUserId,
@@ -85,16 +84,14 @@ userRouter.put('/email/clear', async (_req: Request, res: Response): Promise<voi
 
 userRouter.get('/email/status', async (req: Request, res: Response): Promise<void> => {
   try {
-    // Extract validate query parameter
-    const validate = req.query.validate === 'true';
-    const result = await checkEmailStatus({ validate });
-
+    // For local-only setups, always return a permissive status
+    // Email is optional and should not block operations
     res.json(
       ApiSchemas.User.EmailStatus.Response.parse({
-        hasEmail: result.hasEmail,
-        email: result.email,
-        status: result.status,
-        message: result.message,
+        hasEmail: false,
+        email: undefined,
+        status: 'ok',
+        message: undefined,
       }),
     );
   } catch (error) {
