@@ -1,0 +1,17 @@
+services:
+  promptfoo:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - '3000:3000'
+    env_file:
+      - .env
+    environment:
+      - PROMPTFOO_CONFIG_DIR=/data
+    volumes:
+      - promptfoo-data:/data
+    restart: unless-stopped
+
+volumes:
+  promptfoo-data:

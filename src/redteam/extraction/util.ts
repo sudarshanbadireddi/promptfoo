@@ -72,9 +72,14 @@ export async function callExtraction<T>(
   prompt: string,
   processOutput: (output: string) => T,
 ): Promise<T> {
+  logger.info(`[DEBUG] About to call provider.callApi for extraction`);
+  logger.info(`[DEBUG] Provider: ${provider.id()}`);
+  
   const { output, error } = await provider.callApi(
     JSON.stringify([{ role: 'user', content: prompt }]),
   );
+
+  logger.info(`[DEBUG] provider.callApi returned`);
 
   if (error) {
     logger.error(`Error in extraction: ${error}`);

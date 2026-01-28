@@ -22,7 +22,9 @@ export async function doRedteamRun(options: RedteamRunOptions): Promise<Eval | u
   // Generate a unique job ID for this execution
   const jobId = crypto.randomUUID();
   
-  // Wrap entire execution in job context
+  logger.info(`[DEBUG] Starting redteam run with jobId: ${jobId}`);
+  
+  // Wrap entire execution in job context for proper log routing
   return runInJobContext(jobId, async () => {
     if (options.verbose) {
       setLogLevel('debug');
@@ -32,6 +34,7 @@ export async function doRedteamRun(options: RedteamRunOptions): Promise<Eval | u
     let removeCallback: (() => void) | null = null;
     if (options.logCallback) {
       removeCallback = addLogCallback(jobId, options.logCallback);
+      logger.info(`[DEBUG] Registered callback for jobId: ${jobId}`);
     }
 
     // Enable live verbose toggle (press 'v' to toggle debug logs)

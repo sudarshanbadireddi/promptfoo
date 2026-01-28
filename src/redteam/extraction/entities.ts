@@ -7,9 +7,13 @@ import type { ApiProvider } from '../../types/index';
 import type { RedTeamTask } from './util';
 
 export async function extractEntities(provider: ApiProvider, prompts: string[]): Promise<string[]> {
+  logger.info(`[DEBUG] extractEntities called. shouldGenerateRemote: ${shouldGenerateRemote()}`);
+  
   if (shouldGenerateRemote()) {
+    logger.info(`[DEBUG] Using remote generation for entities`);
     try {
       const result = await fetchRemoteGeneration('entities' as RedTeamTask, prompts);
+      logger.info(`[DEBUG] Remote generation returned: ${result}`);
       return result as string[];
     } catch (error) {
       logger.warn(
@@ -19,6 +23,8 @@ export async function extractEntities(provider: ApiProvider, prompts: string[]):
     }
   }
 
+  logger.info(`[DEBUG] Using local extraction for entities`);
+  
   // Fallback to local extraction
   const prompt = dedent`
     TASK: Extract only real-world entities from the following prompts.

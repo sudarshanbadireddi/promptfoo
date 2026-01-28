@@ -176,7 +176,11 @@ export function fetchWithTimeout(
       ? AbortSignal.any([options.signal, timeoutController.signal])
       : timeoutController.signal;
 
+    const urlString = typeof url === 'string' ? url : url instanceof URL ? url.toString() : url.url;
+    logger.debug(`[FETCH] Starting request to ${urlString} with timeout ${timeout}ms`);
+
     const timeoutId = setTimeout(() => {
+      logger.debug(`[FETCH] Timeout fired for ${urlString} after ${timeout}ms`);
       timeoutController.abort();
       reject(new Error(`Request timed out after ${timeout} ms`));
     }, timeout);
@@ -186,10 +190,12 @@ export function fetchWithTimeout(
       signal,
     })
       .then((response) => {
+        logger.debug(`[FETCH] Request to ${urlString} completed with status ${response.status}`);
         clearTimeout(timeoutId);
         resolve(response);
       })
       .catch((error) => {
+        logger.debug(`[FETCH] Request to ${urlString} failed: ${error.message}`);
         clearTimeout(timeoutId);
         reject(error);
       });

@@ -264,6 +264,10 @@ redteamRouter.post('/run', async (req: Request, res: Response): Promise<void> =>
   const id = crypto.randomUUID();
   const abortController = new AbortController();
   
+  // Debug: Check environment variables
+  logger.info(`[DEBUG] PROMPTFOO_DISABLE_REMOTE_GENERATION: ${process.env.PROMPTFOO_DISABLE_REMOTE_GENERATION}`);
+  logger.info(`[DEBUG] OPENAI_API_KEY exists: ${!!process.env.OPENAI_API_KEY}`);
+  
   // Track this job
   runningJobIds.set(id, abortController);
 
