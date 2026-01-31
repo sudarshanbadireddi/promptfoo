@@ -32,10 +32,10 @@ __pycache__
 .vscode/
 
 # Examples-related
-examples/**/package-lock.json
-examples/huggingface-dataset-factuality/.cache
-examples/redteam-dalle/images
-examples/redteam-medical-agent/redteam.yaml
+examples/
+
+# Tests
+test/
 
 # Evaluation results
 examples/grok-4-political-bias/results.json

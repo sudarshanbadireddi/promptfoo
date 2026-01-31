@@ -379,22 +379,23 @@ export async function doEval(
       testSuite.tests = await filterTests(testSuite, filterOptions);
     }
 
-    if (
-      config.redteam &&
-      config.redteam.plugins &&
-      config.redteam.plugins.length > 0 &&
-      testSuite.tests &&
-      testSuite.tests.length > 0
-    ) {
-      // Prompt for email until we get a valid one
-      // Other status problems apart from bad emails (like 'exceeded_limit') just log and exit
-      let hasValidEmail = false;
-      while (!hasValidEmail) {
-        const { emailNeedsValidation } = await promptForEmailUnverified();
-        const res = await checkEmailStatusAndMaybeExit({ validate: emailNeedsValidation });
-        hasValidEmail = res === EMAIL_OK_STATUS;
-      }
-    }
+    // Email verification disabled for self-hosted deployment
+    // if (
+    //   config.redteam &&
+    //   config.redteam.plugins &&
+    //   config.redteam.plugins.length > 0 &&
+    //   testSuite.tests &&
+    //   testSuite.tests.length > 0
+    // ) {
+    //   // Prompt for email until we get a valid one
+    //   // Other status problems apart from bad emails (like 'exceeded_limit') just log and exit
+    //   let hasValidEmail = false;
+    //   while (!hasValidEmail) {
+    //     const { emailNeedsValidation } = await promptForEmailUnverified();
+    //     const res = await checkEmailStatusAndMaybeExit({ validate: emailNeedsValidation });
+    //     hasValidEmail = res === EMAIL_OK_STATUS;
+    //   }
+    // }
 
     if (!resumeEval) {
       testSuite.providers = filterProviders(
