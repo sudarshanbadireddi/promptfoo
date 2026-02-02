@@ -138,7 +138,11 @@ export async function doRedteamRun(options: RedteamRunOptions): Promise<Eval | u
 
   // Run evaluation
   logger.info('Running scan...');
-  const { defaultConfig } = await loadDefaultConfig();
+  // Skip loading default config when using liveRedteamConfig (web UI mode)
+  // to avoid unnecessary file system lookups
+  const { defaultConfig } = options.liveRedteamConfig 
+    ? { defaultConfig: {} } 
+    : await loadDefaultConfig();
   // Exclude 'description' from options to avoid conflict with Commander's description method
   const { description: _description, ...evalOptions } = options;
   const evalResult = await doEval(

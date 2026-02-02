@@ -111,12 +111,16 @@ export default function Review({
   }, [jobs]);
   const pollIntervalRef = useRef<Map<string, number>>(new Map()); // Track multiple poll intervals
   
-  // Track which jobs THIS browser instance is actively polling (for log display)
-  const [activePollingJobIds, setActivePollingJobIds] = useState<Set<string>>(new Set());
+  // Track which job THIS browser instance started (for single-job log display)
+  const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [pollLogs, setPollLogs] = useState<Record<string, string[]>>({});
   
-  // Create synthetic jobs from activePollingJobIds and pollLogs for immediate display
+  // Only display the job started by THIS browser instance
   const displayJobs = useMemo(() => {
+    if (!activeJobId) {
+      return [];
+    }
+
     // Ensure jobs is a Map (it might be deserialized from localStorage as object)
     let jobsMap: Map<string, RedteamJob>;
     if (jobs instanceof Map) {
@@ -127,20 +131,15 @@ export default function Review({
       jobsMap = new Map();
     }
 
-    if (activePollingJobIds.size > 0) {
-      return Array.from(activePollingJobIds).map(jobId => {
-        const storeJob = jobsMap.get(jobId);
-        return {
-          id: jobId,
-          status: storeJob?.status || 'running',
-          logs: pollLogs[jobId] || storeJob?.logs || [],
-          evalId: storeJob?.evalId || null,
-          result: storeJob?.result || null,
-        } as RedteamJob;
-      });
-    }
-    return runningJobs;
-  }, [activePollingJobIds, pollLogs, jobs, runningJobs]);
+    const storeJob = jobsMap.get(activeJobId);
+    return [{
+      id: activeJobId,
+      status: storeJob?.status || 'running',
+      logs: pollLogs[activeJobId] || storeJob?.logs || [],
+      evalId: storeJob?.evalId || null,
+      result: storeJob?.result || null,
+    } as RedteamJob];
+  }, [activeJobId, pollLogs, jobs]);
   const [isYamlDialogOpen, setIsYamlDialogOpen] = React.useState(false);
   const yamlContent = useMemo(() => generateOrderedYaml(config), [config]);
 
@@ -476,8 +475,8 @@ export default function Review({
         add(jobId);
       }
       
-      // Track that this browser is polling this job
-      setActivePollingJobIds(prev => new Set(prev).add(jobId));
+      // Set this as the active job for this browser instance (for single-job log display)
+      setActiveJobId(jobId);
       
       // Track last log index for incremental updates
       let lastLogIndex = 0;
@@ -490,11 +489,9 @@ export default function Review({
             window.clearInterval(interval);
             const pollIntervals = pollIntervalRef.current;
             pollIntervals.delete(jobId);
-            setActivePollingJobIds(prev => {
-              const next = new Set(prev);
-              next.delete(jobId);
-              return next;
-            });
+            if (activeJobId === jobId) {
+              setActiveJobId(null);
+            }
             const remove = useRedteamJobStore.getState().removeJob;
             if (typeof remove === 'function') {
               remove(jobId);
@@ -533,11 +530,9 @@ export default function Review({
             window.clearInterval(interval);
             const pollIntervals = pollIntervalRef.current;
             pollIntervals.delete(jobId);
-            setActivePollingJobIds(prev => {
-              const next = new Set(prev);
-              next.delete(jobId);
-              return next;
-            });
+            if (activeJobId === jobId) {
+              setActiveJobId(null);
+            }
 
             const update = useRedteamJobStore.getState().updateJob;
             if (typeof update === 'function') {
@@ -660,6 +655,12 @@ export default function Review({
       if (pollIntervals.has(jobId)) {
         window.clearInterval(pollIntervals.get(jobId)!);
         pollIntervals.delete(jobId);
+      }
+
+      // Clear activeJobId if we're cancelling the active job
+      if (activeJobId === jobId) {
+        setActiveJobId(null);
+        setIsRunning(false);
       }
 
       removeJob(jobId);
@@ -1246,23 +1247,17 @@ export default function Review({
                   </TooltipTrigger>
                   {runNowTooltipMessage && <TooltipContent>{runNowTooltipMessage}</TooltipContent>}
                 </Tooltip>
-                {isRunning && (
-                  <div className="flex gap-2">
-                    {runningJobs.map((job: RedteamJob) => (
-                      <Button 
-                        key={job.id}
-                        variant="destructive" 
-                        onClick={async () => {
-                          await handleCancel(job.id);
-                        }} 
-                        className="gap-2"
-                        title={`Cancel job ${job.id}`}
-                      >
-                        <Square className="size-4" />
-                        Cancel {runningJobs.length > 1 ? `(${job.id.slice(0, 8)})` : ''}
-                      </Button>
-                    ))}
-                  </div>
+                {isRunning && activeJobId && (
+                  <Button 
+                    variant="destructive" 
+                    onClick={async () => {
+                      await handleCancel(activeJobId);
+                    }} 
+                    className="gap-2"
+                  >
+                    <Square className="size-4" />
+                    Cancel
+                  </Button>
                 )}
                 {evalId && (
                   <>
@@ -1285,10 +1280,7 @@ export default function Review({
             {displayJobs.length > 0 && (
               <div className="mt-4">
                 {displayJobs.map((job: RedteamJob) => (
-                  <div key={job.id} className="mb-4">
-                    {displayJobs.length > 1 && (
-                      <h4 className="mb-2 text-sm font-semibold">Job {job.id.slice(0, 8)} Logs</h4>
-                    )}
+                  <div key={job.id}>
                     {job.logs?.length ? (
                       <LogViewer logs={job.logs} />
                     ) : (
