@@ -449,16 +449,29 @@ export async function checkCloudPermissions(config: Partial<UnifiedConfig>): Pro
             },
           ];
 
+      // Filter out known schema mismatches between client and server
+      // The client schema correctly accepts string[] for redteam.language,
+      // but the server hasn't been updated yet - this is non-blocking
+      const filteredErrors = errors.filter((error) => {
+        return !(
+          error.type === 'config' &&
+          error.message.includes('redteam.language') &&
+          error.message.includes('Expected string, received array')
+        );
+      });
+
       if (response.status === 403) {
         throw new ConfigPermissionError(
-          `Permission denied: ${convertErrorsToReadableMessage(errors)}`,
+          `Permission denied: ${convertErrorsToReadableMessage(filteredErrors)}`,
         );
       }
 
       // For other errors, log and continue (existing behavior)
-      logger.warn(
-        `Error checking permissions: ${convertErrorsToReadableMessage(errors)}. Continuing anyway.`,
-      );
+      if (filteredErrors.length > 0) {
+        logger.warn(
+          `Error checking permissions: ${convertErrorsToReadableMessage(filteredErrors)}. Continuing anyway.`,
+        );
+      }
       return;
     }
 
